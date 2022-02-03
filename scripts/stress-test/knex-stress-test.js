@@ -3,20 +3,13 @@ const Knex = require('../../lib');
 const toxiproxy = require('toxiproxy-node-client');
 const toxicli = new toxiproxy.Toxiproxy('http://localhost:8474');
 const rp = require('request-promise-native');
-const delay = require('../../lib/execution/internal/delay');
+const delay = require('../../lib/util/delay');
 
 // init instances
 const pg = Knex({
   client: 'pg',
   connection:
     'postgres://postgres:postgresrootpassword@localhost:25432/postgres',
-  pool: { max: 50 },
-});
-
-const pgnative = Knex({
-  client: 'pgnative',
-  connection:
-    'postgres://postgres:postgresrootpassword@localhost:25433/postgres',
   pool: { max: 50 },
 });
 
@@ -98,8 +91,8 @@ setInterval(() => {
   lastCounters = _.cloneDeep(counters);
 }, 2000);
 
-async function killConnectionsPg(client) {
-  return client.raw(`SELECT pg_terminate_backend(pg_stat_activity.pid)
+async function killConnectionsPg() {
+  return pg.raw(`SELECT pg_terminate_backend(pg_stat_activity.pid)
     FROM pg_stat_activity
     WHERE pg_stat_activity.datname = 'postgres'
       AND pid <> pg_backend_pid()`);
@@ -111,6 +104,11 @@ async function killConnectionsMyslq(client) {
 }
 
 async function killConnectionsMssql() {
+  const rows = await mssql('sys.dm_exec_sessions').select('session_id');
+  await Promise.all(rows.map((row) => mssql.raw(`KILL ${row.session_id}`)));
+}
+
+async function killConnectionsSybase() {
   const rows = await mssql('sys.dm_exec_sessions').select('session_id');
   await Promise.all(rows.map((row) => mssql.raw(`KILL ${row.session_id}`)));
 }
@@ -161,9 +159,8 @@ async function main() {
   // create TCP proxies for simulating bad connections etc.
   async function recreateProxies() {
     await recreateProxy('postgresql', 25432, 5432);
-    await recreateProxy('postgresql', 25433, 5433);
     await recreateProxy('mysql', 23306, 3306);
-    await recreateProxy('oracledb', 21521, 1521);
+    await recreateProxy('oracledbxe', 21521, 1521);
     await recreateProxy('mssql', 21433, 1433);
   }
 
@@ -171,9 +168,6 @@ async function main() {
 
   loopQueries('PSQL:', pg.raw('select 1'));
   loopQueries('PSQL TO:', pg.raw('select 1').timeout(20));
-
-  loopQueries('PGNATIVE:', pgnative.raw('select 1'));
-  loopQueries('PGNATIVE TO:', pgnative.raw('select 1').timeout(20));
 
   loopQueries('MYSQL:', mysql.raw('select 1'));
   loopQueries('MYSQL TO:', mysql.raw('select 1').timeout(20));
@@ -192,11 +186,11 @@ async function main() {
     await delay(20); // kill everything every quite often from server side
     try {
       await Promise.all([
-        killConnectionsPg(pg),
-        killConnectionsPg(pgnative),
+        killConnectionsPg(),
         killConnectionsMyslq(mysql),
         //        killConnectionsMyslq(mysql2),
         killConnectionsMssql(),
+        killConnectionsSybase(),
       ]);
     } catch (err) {
       console.log('KILLER ERROR:', err);
